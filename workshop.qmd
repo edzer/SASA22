@@ -1,0 +1,302 @@
+---
+title: "SASA22 workshop: An introduction to spatial data science with R"
+author: "Edzer Pebesma"
+date: Nov 28, 2022
+toc: true
+format: html
+---
+
+<!-- This workshop will give an introduction into handling and analysing spatial vector and raster data with R, and exemplify a number of spatial statistical methods including point pattern analysis, geostatistical analysis, and lattice data analysis. The workshop will focus on R packages sf and stars, and a number of analysis packages that are compatible with these. Some prior experience with R is strongly recommended. -->
+
+<!-- \ce: execute chunk; \ch: execute everything above -->
+
+Wokshop materials: <https://github.com/edzer/SASA22/>
+
+Resources: [Spatial Data Science](https://r-spatial.org/book/)
+
+# Intro:
+
+* who am I?
+* how do I get the materials, and view|run it locally?
+    * have RStudio on your computer, otherwise install it
+    * go to workshop materials page
+    * download the file workshop.qmd locally (view raw - save)
+	* double click the file: should open in RStudio
+    * click the "Render" button to render all, or
+	* click "yes" if RStudio asks you to install missing packages
+    * click for a particular code chunk the "Run All Chunks Above", followed by "Run Current Chunk"
+
+* what are pipes? a syntax alternative to function composition:
+
+The following three approaches to computing `d?` are all the same:
+```{r}
+# use temporary variables:
+a <- 3
+3 -> a
+b <- sqrt(a)
+c <- sin(b)
+d1 <- abs(c)
+# use function composition:
+d2 = abs(sin(sqrt(3)))
+# use pipe, assign left
+d3 <- 3 |> sqrt() |> sin() |> abs()
+# use pipe, assign right:
+3 |> sqrt() |> sin() |> abs() -> d4
+identical(d1, d2, d3, d4)
+```
+
+* assignment: `=` `<-`: identical; `->` right-assigns
+
+# Units, coordinates, reference systems
+
+What does the coordinate
+```
+POINT(25, -29)
+```
+mean? It has:
+
+* missing units
+* which value is associate with N/E/S/W, or longitude/latitude
+* missing direction
+* missing _coordinate reference_
+
+How do coordinate reference systems work? They contain:
+
+* a reference _datum_ (ellipsoid: shape + origin)
+* possibly a conversion (projection)
+
+```{r}
+library(sf)
+st_crs("EPSG:2053")
+```
+
+```{r}
+library(dplyr)
+library(rnaturalearth)
+ne_countries(returnclass = "sf") |> 
+  filter(admin == "South Africa") -> sa
+plot(st_geometry(sa), graticule = TRUE, axes = TRUE, col = 'lightgreen')
+st_geometry(sa) |> st_transform('EPSG:2053') |> plot() # .... uh?
+sf_proj_pipelines('OGC:CRS84', 'EPSG:2053')
+utm34s = st_crs('EPSG:22234')
+st_geometry(sa) |> st_transform(utm34s) |> plot(graticule = TRUE, axes=TRUE)
+```
+
+## interactive maps:
+
+```{r}
+library(mapview)
+mapview(sa)
+```
+
+
+```{r}
+ne_countries(returnclass = "sf", scale = 10) |> 
+  filter(admin == "South Africa") -> sa10
+mapview(sa10)
+st_geometry(sa)   |> object.size()
+st_geometry(sa10) |> object.size()
+```
+
+# Areas
+
+```{r}
+library(units)
+st_geometry(sa) |> st_area() |> set_units(km^2)
+s2 <- sf_use_s2(FALSE) # switch from spherical to ellipsoidal area computation:
+st_geometry(sa) |> st_area() |> set_units(km^2)
+st_geometry(sa) |> st_transform('EPSG:2053') |> st_area() |> set_units(km^2)
+st_geometry(sa) |> st_transform(utm34s) |> st_area() |> set_units(km^2)
+# Lambert equal area projection:
+st_geometry(sa) |> st_centroid()
+laea = st_crs("+proj=laea +lon_0=25 +lat_0=-29")
+st_geometry(sa) |> st_transform(laea) |> st_area() |> set_units(km^2)
+sf_use_s2(s2) # restore
+```
+
+
+#  Raster data
+
+```{r}
+library(elevatr)
+library(stars)
+get_elev_raster(sa, z = 4) |> st_as_stars() -> elev
+# also try out z = 5, z = 6, z = 7 etc for higher resolutions
+plot(elev, reset = FALSE)
+st_geometry(sa) |> plot(col = NA, add = TRUE)
+```
+
+Select only the area inside SA, and use equal color breaks:
+```{r}
+plot(elev[sa], breaks = "equal", reset = FALSE)
+st_geometry(sa) |> plot(col = NA, add = TRUE)
+```
+
+```{r}
+elev
+```
+
+#  Geostatistical data
+
+Suppose we have 200 elevation observations, randomly sampled over the area of SA:
+```{r}
+set.seed(1331) # remove this if you want different random points
+pts = st_sample(sa, 200)
+st_geometry(sa) |> plot()
+plot(pts, add = TRUE)
+elev.200 = st_extract(elev, pts) |> setNames(c("elev", "geometry")) |> 
+  st_transform(utm34s)
+```
+
+Inverse distance interpolation:
+```{r}
+elev[sa] |> st_warp(crs = utm34s) -> elev.utm
+library(gstat)
+k = idw(elev ~ 1, elev.200, elev.utm)
+plot(k, reset = FALSE)
+plot(elev.200, add = TRUE, pch = 3, col = 'green')
+```
+
+Ordinary kriging
+```{r}
+v = variogram(elev~1, elev.200)
+v.fit = fit.variogram(v, vgm(1e5, "Exp", 1e5))
+plot(v, v.fit)
+kr = krige(elev ~ 1, elev.200, elev.utm, v.fit)
+plot(kr, reset = FALSE)
+plot(elev.200, add = TRUE, pch = 3, col = 'green')
+```
+
+Side-by-side comparison idw - OK:
+```{r}
+kr$idw = k$var1.pred # copy over raster layer
+kr$ok = kr$var1.pred # copy over raster layer
+kr[c("idw", "ok")] |> 
+  setNames(c("inverse distance weighted", "ordinary kriging")) |> 
+  merge() |> 
+  plot()
+```
+
+Doing the same with ggplot2:
+```{r}
+kr[c("idw", "ok")] |> 
+  setNames(c("inverse distance weighted", "ordinary kriging")) |> 
+  merge() |> setNames("elev") -> d
+library(ggplot2)
+ggplot() + geom_stars(data = d) +
+		facet_wrap(~attributes) +
+		coord_equal() +
+        theme_void() +
+        scale_x_discrete(expand = c(0,0)) +
+        scale_y_discrete(expand = c(0,0)) +
+        scale_fill_viridis_c()
+```
+
+Or mapview:
+
+```{r}
+mapview(d[,,,1]) + mapview(d[,,,2])
+```
+
+#  Point patterns
+
+Although we know that `elev.200` is a random sample, we can do some point
+pattern analysis on it:
+```{r}
+library(spatstat)
+pts = st_geometry(elev.200)
+st_geometry(sa) |> st_transform(utm34s) -> sa.utm
+c(sa.utm, pts)
+c(sa.utm, pts) |> as.ppp() -> pp
+plot(density(pp))
+plot(sa.utm, add = TRUE)
+```
+
+We can explore the density of point by comparing to completely
+spatially random (CSR):
+
+```{r}
+Gest(pp) |> plot() # nearest neighbour distance
+Kest(pp) |> plot() # lamba * K(r) = # of points expected in a radius r
+```
+
+```{r}
+st_sample(sa.utm, 200, type = "regular") |> st_geometry() -> r
+c(sa.utm, r) |> as.ppp() -> pp.r
+Gest(pp.r) |> plot() # nearest neighbour distance
+Kest(pp.r) |> plot() # lamba * K(r) = # of points expected in a radius r
+plot(st_geometry(sa.utm))
+plot(pp.r, add = TRUE)
+```
+
+#  Area/lattice data
+
+We will create some artificial lattice data by first creating a voronoi tesselation using the 200 random points:
+
+```{r}
+st_geometry(elev.200) |> 
+  st_combine() |> 
+  st_voronoi() |> 
+  st_collection_extract("POLYGON") -> v
+plot(v)
+```
+
+We will constrain this to the area of SA:
+```{r}
+v2 = st_intersection(sa.utm, v)
+plot(v2)
+```
+
+and compute _mean_ elevation for each of the polygons:
+
+```{r}
+aggregate(elev.utm, v2, mean, na.rm = TRUE) |> st_as_sf() -> v2.elev
+names(v2.elev)[1] = "elev"
+plot(v2.elev)
+```
+
+Next, we can compute spatial neigbours for each polygon, using `spdep::poly2nb()`:
+
+```{r}
+library(spdep)
+v2.elev |> poly2nb() -> nb
+nb
+plot(st_geometry(v2.elev))
+v2.elev |> st_geometry() |> st_centroid() |> st_coordinates() -> cc
+plot(nb, coords = cc, add = TRUE, col = 'orange')
+```
+
+and, using row-standardised weights list
+```{r}
+lw = nb2listw(nb)
+```
+
+we can compute Moran's I, first for random data:
+```{r}
+set.seed(1)
+v2.elev$random = rnorm(nrow(v2.elev))
+moran.test(v2.elev$random, lw)
+```
+
+then for actual (elevation) data:
+```{r}
+moran.test(v2.elev$elev, lw)
+```
+
+```{r}
+v2.elev$x = cc[,1]
+v2.elev$y = cc[,2]
+lm(elev~1, v2.elev) |> lm.morantest(lw)
+lm(elev~x+y, v2.elev) |> lm.morantest(lw)
+```
+
+Non-spatial and spatial regression model, using `x` and `y` as regressors, can be computed; non-spatial uses `lm()`:
+```{r}
+lm(elev~x+y, v2.elev) |> summary()
+```
+
+Spatial error model can use one of many (see Ch 17), here `errorsarlm()`:
+```{r}
+library(spatialreg)
+errorsarlm(elev~x+y, v2.elev, listw = lw, Durbin=FALSE) |> summary()
+```
